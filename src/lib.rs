@@ -1,11 +1,24 @@
 use reqwest::Method;
+use reqwest::header;
 use secrecy::SecretString;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use pbkdf2::pbkdf2;
 
 const DEFAULT_API_URL: &str = "https://cohost.org/api/v1";
-const PBKDF2_ROUNDS: u32 = 200000;
+const PBKDF2_ROUNDS: u32 = 200_000; // lol why is this a u32 and not a usize
+const PBKDF2_OUTPUT_SIZE: usize = 128;
+
+// Thanks to iliana for this function
+fn hash_password(password: &str, salt_base64: &str) -> Result<String, base64::DecodeError> {
+    let mut out = [0; PBKDF2_OUTPUT_SIZE];
+    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha384>>(
+        password.as_bytes(),
+        &base64::decode_config(&salt_base64, base64::URL_SAFE_NO_PAD)?,
+        PBKDF2_ROUNDS,
+        &mut out,
+    );
+    Ok(base64::encode(&out))
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -22,9 +35,17 @@ struct Salt {
     salt: String
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginRequest {
+    email: String,
+    client_hash: String,
+}
+
 pub struct Client {
     url_base: String,
     inner: reqwest::Client,
+
 }
 
 impl Client {
@@ -40,14 +61,17 @@ impl Client {
             inner,
         };
         let Salt { salt } = ret.inner
-            .request(Method::GET, ret.url("/login"))
+            .request(Method::GET, ret.url("/login/salt"))
             .query(&[("email", email)])
             .header("Content-Type", "application/json")
             .send().await?.json().await?;
-        let decoded_salt = base64::decode(&salt)?;
-        let mut hashed_password = [0u8; 128];
-        pbkdf2::<()>(password.expose_secret().as_bytes(), &decoded_salt, PBKDF2_ROUNDS, &mut hashed_password);
-
+        let client_hash = hash_password(&password.expose_secret(), &salt)?;
+        let login_response = ret.inner
+            .request(Method::POST, ret.url("/login"))
+            .json(&LoginRequest { email: email.to_owned(), client_hash })
+            .header("Content-Type", "application/json")
+            .send().await?;
+        let cookie = login_response.headers().get(header::SET_COOKIE);
         Ok(ret)
     }
 }
