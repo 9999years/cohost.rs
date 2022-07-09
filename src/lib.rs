@@ -1,7 +1,8 @@
+use std::sync::Arc;
+
 use reqwest::Method;
-use reqwest::header;
-use secrecy::SecretString;
 use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_API_URL: &str = "https://cohost.org/api/v1";
@@ -9,6 +10,7 @@ const PBKDF2_ROUNDS: u32 = 200_000; // lol why is this a u32 and not a usize
 const PBKDF2_OUTPUT_SIZE: usize = 128;
 
 // Thanks to iliana for this function
+#[tracing::instrument(skip_all)]
 fn hash_password(password: &str, salt_base64: &str) -> Result<String, base64::DecodeError> {
     let mut out = [0; PBKDF2_OUTPUT_SIZE];
     pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha384>>(
@@ -32,7 +34,7 @@ pub enum Error {
 #[derive(Deserialize)]
 struct Salt {
     /// Base64-encoded data.
-    salt: String
+    salt: String,
 }
 
 #[derive(Serialize)]
@@ -42,10 +44,18 @@ struct LoginRequest {
     client_hash: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginResponse {
+    user_id: String,
+    #[serde(flatten)]
+    rest: serde_json::Value,
+}
+
 pub struct Client {
     url_base: String,
     inner: reqwest::Client,
-
+    user_id: String,
 }
 
 impl Client {
@@ -54,33 +64,47 @@ impl Client {
         format!("{}{endpoint}", self.url_base)
     }
 
+    #[tracing::instrument]
     pub async fn login(email: &str, password: &SecretString) -> Result<Self, Error> {
-        let inner = reqwest::Client::new();
-        let ret = Client {
+        let inner = reqwest::Client::builder()
+            .cookie_store(true)
+            .cookie_provider(Arc::new(reqwest::cookie::Jar::default()))
+            .build()
+            .unwrap();
+        let mut ret = Client {
             url_base: DEFAULT_API_URL.to_owned(),
             inner,
+            user_id: "".to_owned(),
         };
-        let Salt { salt } = ret.inner
+        let Salt { salt } = ret
+            .inner
             .request(Method::GET, ret.url("/login/salt"))
             .query(&[("email", email)])
             .header("Content-Type", "application/json")
-            .send().await?.json().await?;
+            .send()
+            .await?
+            .json()
+            .await?;
+        tracing::debug!("Got salt");
         let client_hash = hash_password(&password.expose_secret(), &salt)?;
-        let login_response = ret.inner
+        let response = ret
+            .inner
             .request(Method::POST, ret.url("/login"))
-            .json(&LoginRequest { email: email.to_owned(), client_hash })
+            .json(&LoginRequest {
+                email: email.to_owned(),
+                client_hash,
+            })
             .header("Content-Type", "application/json")
-            .send().await?;
-        let cookie = login_response.headers().get(header::SET_COOKIE);
+            .send()
+            .await?;
+        tracing::debug!("Response: {response}", response = response.text().await?);
+        // tracing::debug!(?rest, "Extra login data");
+        // ret.user_id = user_id;
+
         Ok(ret)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
+    pub fn user_id(&self) -> &str {
+        &self.user_id
     }
 }
