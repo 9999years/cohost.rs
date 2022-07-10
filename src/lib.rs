@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use reqwest::Method;
@@ -64,14 +66,14 @@ impl Client {
         format!("{}{endpoint}", self.url_base)
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     pub async fn login(email: &str, password: &SecretString) -> Result<Self, Error> {
         let inner = reqwest::Client::builder()
             .cookie_store(true)
             .cookie_provider(Arc::new(reqwest::cookie::Jar::default()))
             .build()
             .unwrap();
-        let mut ret = Client {
+        let ret = Client {
             url_base: DEFAULT_API_URL.to_owned(),
             inner,
             user_id: "".to_owned(),
